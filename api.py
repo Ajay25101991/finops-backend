@@ -7,7 +7,7 @@ from importlib.machinery import SourceFileLoader
 
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
@@ -71,12 +71,17 @@ async def generate_report(
         if not os.path.exists(out_path):
             return JSONResponse(status_code=500, content={"error": "Engine ran but did not produce output file."})
 
-        return FileResponse(
-            out_path,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename="Financial_Statements.xlsx",
-            headers={"Access-Control-Expose-Headers": "Content-Disposition"},
-        )
+        with open(out_path, "rb") as f:
+            content = f.read()
+
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": "attachment; filename=Financial_Statements.xlsx",
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        }
+    )
 
 
 # ── Data Cleaner ──────────────────────────────────────────────────────────────
