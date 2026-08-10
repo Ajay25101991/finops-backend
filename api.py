@@ -27,7 +27,8 @@ def get_engine():
     return _engine
 
 # ── OpenAI client ─────────────────────────────────────────────────────────────
-openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+_api_key = os.environ.get("OPENAI_API_KEY", "")
+openai_client = OpenAI(api_key=_api_key) if _api_key else None
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="FinOps Report Generator")
