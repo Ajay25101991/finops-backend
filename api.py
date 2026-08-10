@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import importlib.util
+from importlib.machinery import SourceFileLoader
 
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form
@@ -14,9 +15,10 @@ from data_cleaner import clean
 
 # ── Load FS engine ────────────────────────────────────────────────────────────
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "TB to Financial Statements 1 click.Py")
-spec   = importlib.util.spec_from_file_location("fs_engine", SCRIPT_PATH)
-engine = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(engine)
+_loader = SourceFileLoader("fs_engine", SCRIPT_PATH)
+spec    = importlib.util.spec_from_loader("fs_engine", _loader)
+engine  = importlib.util.module_from_spec(spec)
+_loader.exec_module(engine)
 
 # ── OpenAI client ─────────────────────────────────────────────────────────────
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
