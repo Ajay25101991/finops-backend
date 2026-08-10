@@ -13,12 +13,18 @@ from openai import OpenAI
 
 from data_cleaner import clean
 
-# ── Load FS engine ────────────────────────────────────────────────────────────
+# ── Load FS engine lazily (avoids startup crash if file path issues) ──────────
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "TB to Financial Statements 1 click.Py")
-_loader = SourceFileLoader("fs_engine", SCRIPT_PATH)
-spec    = importlib.util.spec_from_loader("fs_engine", _loader)
-engine  = importlib.util.module_from_spec(spec)
-_loader.exec_module(engine)
+_engine = None
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        loader  = SourceFileLoader("fs_engine", SCRIPT_PATH)
+        spec    = importlib.util.spec_from_loader("fs_engine", loader)
+        _engine = importlib.util.module_from_spec(spec)
+        loader.exec_module(_engine)
+    return _engine
 
 # ── OpenAI client ─────────────────────────────────────────────────────────────
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
@@ -56,7 +62,7 @@ async def generate_report(
         with open(tb_path,  "wb") as f: f.write(await tb.read())
         with open(map_path, "wb") as f: f.write(await mapping.read())
 
-        engine.generate(tb_path, map_path, out_path, company=company, period=period)
+        get_engine().generate(tb_path, map_path, out_path, company=company, period=period)
 
         return FileResponse(
             out_path,
