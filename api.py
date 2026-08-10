@@ -63,7 +63,13 @@ async def generate_report(
         with open(tb_path,  "wb") as f: f.write(await tb.read())
         with open(map_path, "wb") as f: f.write(await mapping.read())
 
-        get_engine().generate(tb_path, map_path, out_path, company=company, period=period)
+        try:
+            get_engine().generate(tb_path, map_path, out_path, company=company, period=period)
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"FS engine error: {str(e)}"})
+
+        if not os.path.exists(out_path):
+            return JSONResponse(status_code=500, content={"error": "Engine ran but did not produce output file."})
 
         return FileResponse(
             out_path,
