@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
-from data_cleaner import clean
+from data_cleaner import clean, clean_excel_structural
 
 # ── Load FS engine lazily (avoids startup crash if file path issues) ──────────
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "TB to Financial Statements 1 click.Py")
@@ -94,6 +94,14 @@ async def clean_data(
     raw = await file.read()
     ext = file.filename.split(".")[-1].lower()
 
+    # 2. Pass 1 — openpyxl structural fixes (Excel only)
+    structural_fixes = []
+    if ext in ("xlsx", "xls", "xlsm"):
+        try:
+            raw, structural_fixes = clean_excel_structural(raw)
+        except Exception as e:
+            structural_fixes = []  # non-fatal — continue with original
+
     try:
         if ext == "csv":
             df = pd.read_csv(io.BytesIO(raw))
@@ -102,8 +110,8 @@ async def clean_data(
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": f"Could not read file: {str(e)}"})
 
-    # 2. Run cleaning engine
-    result = clean(df)
+    # 3. Pass 2 — pandas data quality checks
+    result = clean(df, structural_fixes=structural_fixes)
 
     issues    = result["issues"]
     df_clean  = result["df_clean"]
