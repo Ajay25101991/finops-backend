@@ -121,7 +121,7 @@ async def clean_data(
     ai_summary    = ""
     ai_per_issue  = []
 
-    if openai_client.api_key and issues:
+    if openai_client and issues:
         # Per-issue plain English explanation
         issues_text = "\n".join(
             f"- [{i['severity']}] {i['type']}: {i['detail']}" for i in issues
