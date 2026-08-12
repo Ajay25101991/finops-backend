@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
-from data_cleaner import clean, clean_excel_structural
+from data_cleaner import clean, clean_excel_structural, detect_header_row
 
 # ── Load FS engine lazily (avoids startup crash if file path issues) ──────────
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "TB to Financial Statements 1 click.Py")
@@ -103,10 +103,11 @@ async def clean_data(
             structural_fixes = []  # non-fatal — continue with original
 
     try:
+        header_row = detect_header_row(raw, ext)
         if ext == "csv":
-            df = pd.read_csv(io.BytesIO(raw))
+            df = pd.read_csv(io.BytesIO(raw), header=header_row)
         else:
-            df = pd.read_excel(io.BytesIO(raw))
+            df = pd.read_excel(io.BytesIO(raw), header=header_row)
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": f"Could not read file: {str(e)}"})
 

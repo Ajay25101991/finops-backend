@@ -1,8 +1,9 @@
 """
-data_cleaner.py — Financial data cleaning engine
-Two-pass cleaning:
-  Pass 1 (openpyxl): structural Excel fixes — merged cells, colors, hidden rows/cols, formulas
-  Pass 2 (pandas):   data quality checks — blanks, duplicates, imbalance, whitespace, dates
+data_cleaner.py — General purpose data cleaning engine
+Works on ANY Excel / CSV file — sales reports, GL, TB, invoices, HR data, etc.
+
+Pass 1 (openpyxl): structural Excel fixes
+Pass 2 (pandas):   data quality checks
 """
 
 import io
@@ -12,35 +13,10 @@ import numpy as np
 from typing import Optional
 
 
-# ── Column aliases ─────────────────────────────────────────────────────────────
-COL_ALIASES = {
-    "account":  ["Account", "account", "Acc", "Code", "GL_Code", "AccountCode", "Account Code"],
-    "name":     ["Account_Name", "AccountName", "Description", "Name", "account_name", "Account Name"],
-    "debit":    ["Debit", "debit", "Dr", "DR", "Debit Amount"],
-    "credit":   ["Credit", "credit", "Cr", "CR", "Credit Amount"],
-    "opening":  ["Opening_Balance", "Opening", "Open", "opening", "Opening Balance"],
-    "closing":  ["Closing_Balance", "Closing", "Close", "closing", "Closing Balance"],
-    "date":     ["Date", "date", "Trans_Date", "TransDate", "Posting_Date", "Transaction Date"],
-    "amount":   ["Amount", "amount", "Value", "Net_Amount", "Net Amount"],
-    "vendor":   ["Vendor", "vendor", "Supplier", "Party", "Counterparty"],
-}
-
-
-def _find_col(df: pd.DataFrame, key: str) -> Optional[str]:
-    for alias in COL_ALIASES[key]:
-        if alias in df.columns:
-            return alias
-    return None
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# PASS 1 — openpyxl structural fixes (call before reading into pandas)
+# PASS 1 — openpyxl structural fixes
 # ═══════════════════════════════════════════════════════════════════════════════
-def clean_excel_structural(raw_bytes: bytes) -> tuple[bytes, list]:
-    """
-    Fix Excel-level issues: merged cells, colors, hidden rows/cols, formulas, blank rows/cols.
-    Returns (cleaned_excel_bytes, list_of_fix_dicts)
-    """
+def clean_excel_structural(raw_bytes: bytes) -> tuple:
     try:
         import openpyxl
         from openpyxl.styles import PatternFill
@@ -51,10 +27,9 @@ def clean_excel_structural(raw_bytes: bytes) -> tuple[bytes, list]:
     wb = openpyxl.load_workbook(io.BytesIO(raw_bytes))
     ws = wb.active
 
-    # 1. Unmerge cells + fill down value
+    # 1. Unmerge cells + fill down
     merged_ranges = list(ws.merged_cells.ranges)
-    merge_count = len(merged_ranges)
-    if merge_count > 0:
+    if merged_ranges:
         for mr in merged_ranges:
             top_val = ws.cell(mr.min_row, mr.min_col).value
             ws.unmerge_cells(str(mr))
@@ -64,27 +39,29 @@ def clean_excel_structural(raw_bytes: bytes) -> tuple[bytes, list]:
                     if cell.value is None:
                         cell.value = top_val
         fixes.append({
-            "type": "Unmerged Cells",
+            "type": "Merged Cells Fixed",
             "severity": "Info",
-            "count": merge_count,
-            "detail": f"Unmerged {merge_count} merged cell range(s) and filled values down — merged cells break pivot tables and formulas.",
+            "count": len(merged_ranges),
+            "detail": f"Unmerged {len(merged_ranges)} merged cell range(s) and filled values down — merged cells break formulas and pivot tables.",
             "rows": [],
         })
 
-    # 2. Strip all cell color / background formatting
+    # 2. Strip color formatting
     no_fill = PatternFill(fill_type=None)
-    color_count = 0
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.fill and cell.fill.fill_type and cell.fill.fill_type != "none":
-                cell.fill = no_fill
-                color_count += 1
+    color_count = sum(
+        1 for row in ws.iter_rows()
+        for cell in row
+        if cell.fill and cell.fill.fill_type and cell.fill.fill_type != "none"
+    )
     if color_count > 0:
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.fill = no_fill
         fixes.append({
             "type": "Color Formatting Removed",
             "severity": "Info",
             "count": color_count,
-            "detail": f"Removed color formatting from {color_count} cell(s) — manual highlights can mislead automated processing.",
+            "detail": f"Stripped color formatting from {color_count} cell(s) — manual highlights mislead automated processing.",
             "rows": [],
         })
 
@@ -110,59 +87,58 @@ def clean_excel_structural(raw_bytes: bytes) -> tuple[bytes, list]:
             "type": "Hidden Columns Unhidden",
             "severity": "Warning",
             "count": len(hidden_cols),
-            "detail": f"{len(hidden_cols)} hidden column(s) found and unhidden — hidden columns may contain amounts excluded from totals.",
+            "detail": f"{len(hidden_cols)} hidden column(s) found and unhidden.",
             "rows": [],
         })
 
-    # 5. Strip formulas → keep cached value or None
-    formula_count = 0
-    for row in ws.iter_rows():
-        for cell in row:
-            if isinstance(cell.value, str) and cell.value.startswith("="):
-                cell.value = None  # Can't evaluate without Excel engine
-                formula_count += 1
+    # 5. Strip formulas
+    formula_count = sum(
+        1 for row in ws.iter_rows()
+        for cell in row
+        if isinstance(cell.value, str) and cell.value.startswith("=")
+    )
     if formula_count > 0:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.value = None
         fixes.append({
             "type": "Formulas Removed",
             "severity": "Info",
             "count": formula_count,
-            "detail": f"{formula_count} formula cell(s) cleared — formulas with broken references silently return wrong values.",
+            "detail": f"{formula_count} formula cell(s) cleared — broken references silently return wrong values.",
             "rows": [],
         })
 
-    # 6. Delete fully blank rows (all cells None or empty string)
-    blank_rows_deleted = 0
-    rows_to_delete = []
-    for row in ws.iter_rows():
-        if all(cell.value is None or str(cell.value).strip() == "" for cell in row):
-            rows_to_delete.append(row[0].row)
+    # 6. Delete fully blank rows
+    rows_to_delete = [
+        row[0].row for row in ws.iter_rows()
+        if all(cell.value is None or str(cell.value).strip() == "" for cell in row)
+    ]
     for rn in sorted(rows_to_delete, reverse=True):
         ws.delete_rows(rn)
-        blank_rows_deleted += 1
-    if blank_rows_deleted > 0:
+    if rows_to_delete:
         fixes.append({
             "type": "Blank Rows Removed",
             "severity": "Info",
-            "count": blank_rows_deleted,
-            "detail": f"{blank_rows_deleted} fully blank row(s) deleted — blank rows break imports into accounting systems.",
+            "count": len(rows_to_delete),
+            "detail": f"{len(rows_to_delete)} fully blank row(s) deleted — blank rows break imports into other systems.",
             "rows": [],
         })
 
     # 7. Delete fully blank columns
-    blank_cols_deleted = 0
-    cols_to_delete = []
-    for col in ws.iter_cols():
-        if all(cell.value is None or str(cell.value).strip() == "" for cell in col):
-            cols_to_delete.append(col[0].column)
+    cols_to_delete = [
+        col[0].column for col in ws.iter_cols()
+        if all(cell.value is None or str(cell.value).strip() == "" for cell in col)
+    ]
     for cn in sorted(cols_to_delete, reverse=True):
         ws.delete_cols(cn)
-        blank_cols_deleted += 1
-    if blank_cols_deleted > 0:
+    if cols_to_delete:
         fixes.append({
             "type": "Blank Columns Removed",
             "severity": "Info",
-            "count": blank_cols_deleted,
-            "detail": f"{blank_cols_deleted} fully blank column(s) deleted.",
+            "count": len(cols_to_delete),
+            "detail": f"{len(cols_to_delete)} fully blank column(s) deleted.",
             "rows": [],
         })
 
@@ -173,231 +149,168 @@ def clean_excel_structural(raw_bytes: bytes) -> tuple[bytes, list]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PASS 2 — pandas data quality checks
+# SMART HEADER DETECTION
+# Finds the first row where most cells are non-null strings (i.e. a header row)
+# Handles QuickBooks / ERP exports that have title rows before the real header
+# ═══════════════════════════════════════════════════════════════════════════════
+def detect_header_row(raw_bytes: bytes, ext: str) -> int:
+    """Returns 0-based row index of the best header candidate (default 0)."""
+    try:
+        if ext == "csv":
+            df_raw = pd.read_csv(io.BytesIO(raw_bytes), header=None, nrows=10)
+        else:
+            df_raw = pd.read_excel(io.BytesIO(raw_bytes), header=None, nrows=10)
+
+        best_row, best_score = 0, -1
+        for i, row in df_raw.iterrows():
+            non_null = row.dropna()
+            if len(non_null) == 0:
+                continue
+            # Score: % of cells that are strings (headers are usually strings)
+            str_count = sum(1 for v in non_null if isinstance(v, str) and len(str(v).strip()) > 0)
+            score = str_count / max(len(row), 1)
+            # Prefer rows with more unique, non-repeated values
+            unique_ratio = len(set(str(v) for v in non_null)) / max(len(non_null), 1)
+            total = score * 0.6 + unique_ratio * 0.4
+            if total > best_score:
+                best_score = total
+                best_row = i
+        return int(best_row)
+    except Exception:
+        return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PASS 2 — pandas general data quality checks
 # ═══════════════════════════════════════════════════════════════════════════════
 def clean(df: pd.DataFrame, structural_fixes: list = None) -> dict:
     issues = list(structural_fixes or [])
     total_rows = len(df)
     df_clean = df.copy()
 
-    col_acc  = _find_col(df_clean, "account")
-    col_dr   = _find_col(df_clean, "debit")
-    col_cr   = _find_col(df_clean, "credit")
-    col_name = _find_col(df_clean, "name")
-    col_open = _find_col(df_clean, "opening")
-    col_clos = _find_col(df_clean, "closing")
-    col_date = _find_col(df_clean, "date")
-    col_amt  = _find_col(df_clean, "amount")
-
-    # ── A. Trim whitespace from all string columns ───────────────────────────
+    # ── A. Trim whitespace ───────────────────────────────────────────────────
     str_cols = df_clean.select_dtypes(include="object").columns.tolist()
-    trimmed_cells = 0
+    trimmed = 0
     for col in str_cols:
         before = df_clean[col].copy()
         df_clean[col] = df_clean[col].apply(lambda x: x.strip() if isinstance(x, str) else x)
-        trimmed_cells += (before != df_clean[col]).sum()
-    if trimmed_cells > 0:
+        trimmed += int((before != df_clean[col]).sum())
+    if trimmed > 0:
         issues.append({
             "type": "Whitespace Trimmed",
             "severity": "Info",
-            "count": int(trimmed_cells),
-            "detail": f"Trimmed leading/trailing spaces from {trimmed_cells} cell(s) — 'Salaries ' ≠ 'Salaries' in lookups.",
+            "count": trimmed,
+            "detail": f"Trimmed leading/trailing spaces from {trimmed} cell(s) — 'Sales ' ≠ 'Sales' in lookups and filters.",
             "rows": [],
         })
 
     # ── B. Numbers stored as text ────────────────────────────────────────────
-    for col_key, col in [("Debit", col_dr), ("Credit", col_cr), ("Amount", col_amt)]:
-        if col is None:
-            continue
-        # Values that look numeric but are stored as string
-        text_nums = df_clean[col].apply(
-            lambda x: isinstance(x, str) and re.sub(r"[,\s]", "", x).replace(".", "", 1).lstrip("-").isdigit()
+    num_as_text_cols = []
+    for col in str_cols:
+        mask = df_clean[col].apply(
+            lambda x: isinstance(x, str) and bool(re.match(r"^-?[\d,\s]+\.?\d*$", x.strip()))
         )
-        if text_nums.any():
-            rows = (df_clean.index[text_nums] + 2).tolist()
+        count = int(mask.sum())
+        if count > 5:  # threshold to avoid false positives on IDs
+            num_as_text_cols.append(col)
+            rows = (df_clean.index[mask] + 2).tolist()
             issues.append({
-                "type": f"Numbers as Text ({col_key})",
+                "type": f"Numbers as Text — {col}",
                 "severity": "Critical",
-                "count": int(text_nums.sum()),
-                "detail": f"{int(text_nums.sum())} {col_key} values stored as text — SUM() returns 0, all totals wrong.",
+                "count": count,
+                "detail": f"Column '{col}' has {count} numeric values stored as text — SUM() returns 0, sorting fails.",
                 "rows": rows[:10],
             })
-            # Fix: convert to numeric
             df_clean[col] = df_clean[col].apply(
-                lambda x: float(re.sub(r"[,\s]", "", x)) if isinstance(x, str) else x
+                lambda x: float(re.sub(r"[,\s]", "", x)) if isinstance(x, str) and re.match(r"^-?[\d,\s]+\.?\d*$", x.strip()) else x
             )
 
-    # ── C. Missing required columns ──────────────────────────────────────────
-    required = ["account", "debit", "credit"]
-    missing_cols = [r for r in required if _find_col(df_clean, r) is None]
-    if missing_cols:
-        issues.append({
-            "type": "Missing Columns",
-            "severity": "Critical",
-            "count": len(missing_cols),
-            "detail": f"Required columns not found: {', '.join(missing_cols)}. Check column headers.",
-            "rows": [],
-        })
-
-    # ── D. Blank account codes ───────────────────────────────────────────────
-    if col_acc:
-        blank_acc = df_clean[col_acc].isna() | (df_clean[col_acc].astype(str).str.strip() == "")
-        if blank_acc.any():
-            rows = (df_clean.index[blank_acc] + 2).tolist()
+    # ── C. Missing values per column ─────────────────────────────────────────
+    for col in df_clean.columns:
+        missing = int(df_clean[col].isna().sum())
+        pct = round(missing / max(total_rows, 1) * 100, 1)
+        if missing > 0 and pct > 5:  # only flag if >5% missing
+            severity = "Critical" if pct > 30 else "Warning" if pct > 10 else "Info"
             issues.append({
-                "type": "Blank Account Code",
-                "severity": "Critical",
-                "count": int(blank_acc.sum()),
-                "detail": f"{int(blank_acc.sum())} rows have no account code — cannot be mapped to financial statements.",
-                "rows": rows[:10],
-            })
-
-    # ── E. Non-numeric debit / credit ────────────────────────────────────────
-    for col_key, col in [("Debit", col_dr), ("Credit", col_cr)]:
-        if col:
-            non_num = pd.to_numeric(df_clean[col], errors="coerce").isna() & df_clean[col].notna()
-            if non_num.any():
-                rows = (df_clean.index[non_num] + 2).tolist()
-                issues.append({
-                    "type": f"Non-Numeric {col_key}",
-                    "severity": "Critical",
-                    "count": int(non_num.sum()),
-                    "detail": f"{int(non_num.sum())} rows have non-numeric values in {col} — totals will be incorrect.",
-                    "rows": rows[:10],
-                })
-            df_clean[col] = pd.to_numeric(df_clean[col], errors="coerce").fillna(0)
-
-    # ── F. Negative debit or credit ──────────────────────────────────────────
-    if col_dr and col_cr:
-        neg = (df_clean[col_dr] < 0) | (df_clean[col_cr] < 0)
-        if neg.any():
-            rows = (df_clean.index[neg] + 2).tolist()
-            issues.append({
-                "type": "Negative Dr/Cr Values",
-                "severity": "Warning",
-                "count": int(neg.sum()),
-                "detail": f"{int(neg.sum())} rows have negative Dr/Cr — typically reversal entries; verify they are intentional.",
-                "rows": rows[:10],
-            })
-
-    # ── G. Trial Balance imbalance ───────────────────────────────────────────
-    if col_dr and col_cr:
-        total_dr = df_clean[col_dr].sum()
-        total_cr = df_clean[col_cr].sum()
-        diff = abs(total_dr - total_cr)
-        if diff > 0.01:
-            issues.append({
-                "type": "Trial Balance Imbalance",
-                "severity": "Critical",
-                "count": 1,
-                "detail": f"Total Debit ({total_dr:,.2f}) ≠ Total Credit ({total_cr:,.2f}). Difference: {diff:,.2f} — TB does not balance.",
+                "type": f"Missing Values — {col}",
+                "severity": severity,
+                "count": missing,
+                "detail": f"Column '{col}' has {missing} missing values ({pct}% blank) — may cause incorrect totals or broken lookups.",
                 "rows": [],
             })
 
-    # ── H. Duplicate account codes ───────────────────────────────────────────
-    if col_acc:
-        acc_series = df_clean[col_acc].astype(str).str.strip()
-        dup = acc_series.duplicated(keep=False) & (acc_series != "")
-        if dup.any():
-            rows = (df_clean.index[dup] + 2).tolist()
-            dup_codes = df_clean.loc[dup, col_acc].unique().tolist()[:5]
-            issues.append({
-                "type": "Duplicate Account Codes",
-                "severity": "Warning",
-                "count": int(dup.sum()),
-                "detail": f"{int(dup.sum())} rows share duplicate account codes: {dup_codes} — may cause double-counting.",
-                "rows": rows[:10],
-            })
-
-    # ── I. Exact duplicate rows ──────────────────────────────────────────────
-    dup_rows = df_clean.duplicated(keep=False)
-    if dup_rows.any():
-        rows = (df_clean.index[dup_rows] + 2).tolist()
+    # ── D. Exact duplicate rows ──────────────────────────────────────────────
+    dup_mask = df_clean.duplicated(keep=False)
+    if dup_mask.any():
+        rows = (df_clean.index[dup_mask] + 2).tolist()
         issues.append({
             "type": "Duplicate Rows",
             "severity": "Critical",
-            "count": int(dup_rows.sum()),
-            "detail": f"{int(dup_rows.sum())} rows are exact duplicates — could represent double-posted journal entries.",
+            "count": int(dup_mask.sum()),
+            "detail": f"{int(dup_mask.sum())} rows are exact duplicates — double-counting risk in totals and reports.",
             "rows": rows[:10],
         })
-        # Fix: remove duplicates, keep first
         df_clean = df_clean.drop_duplicates(keep="first").reset_index(drop=True)
 
-    # ── J. Round-number anomaly detection ───────────────────────────────────
-    amt_col = col_dr or col_amt
-    if amt_col:
-        round_flag = df_clean[amt_col].apply(
-            lambda x: isinstance(x, (int, float)) and x > 0 and x % 10000 == 0
-        )
-        if round_flag.any():
-            rows = (df_clean.index[round_flag] + 2).tolist()
+    # ── E. Mixed data types in numeric columns ───────────────────────────────
+    for col in df_clean.columns:
+        col_data = df_clean[col].dropna()
+        if len(col_data) == 0:
+            continue
+        types = set(type(v).__name__ for v in col_data)
+        if len(types) > 1 and "str" in types and any(t in types for t in ["int", "float"]):
             issues.append({
-                "type": "Round Number Anomaly",
-                "severity": "Info",
-                "count": int(round_flag.sum()),
-                "detail": f"{int(round_flag.sum())} entries are exact multiples of 10,000 — may indicate estimates or manual entries worth reviewing.",
-                "rows": rows[:10],
-            })
-
-    # ── K. Closing balance mismatch ──────────────────────────────────────────
-    if col_open and col_clos and col_dr and col_cr:
-        df_clean[col_open] = pd.to_numeric(df_clean[col_open], errors="coerce").fillna(0)
-        df_clean[col_clos] = pd.to_numeric(df_clean[col_clos], errors="coerce").fillna(0)
-        expected = df_clean[col_open] + df_clean[col_dr] - df_clean[col_cr]
-        mismatch = (expected - df_clean[col_clos]).abs() > 0.5
-        if mismatch.any():
-            rows = (df_clean.index[mismatch] + 2).tolist()
-            issues.append({
-                "type": "Closing Balance Mismatch",
+                "type": f"Mixed Data Types — {col}",
                 "severity": "Warning",
-                "count": int(mismatch.sum()),
-                "detail": f"{int(mismatch.sum())} rows: Opening + Dr - Cr ≠ Closing — likely manual override or rounding error.",
-                "rows": rows[:10],
+                "count": int(col_data.apply(lambda x: isinstance(x, str)).sum()),
+                "detail": f"Column '{col}' contains both numbers and text — calculations on this column will fail.",
+                "rows": [],
             })
 
-    # ── L. Date format inconsistency ─────────────────────────────────────────
-    if col_date:
-        parsed_dates = pd.to_datetime(df_clean[col_date], errors="coerce", infer_datetime_format=True)
-        bad_dates = parsed_dates.isna() & df_clean[col_date].notna()
-        if bad_dates.any():
-            rows = (df_clean.index[bad_dates] + 2).tolist()
-            issues.append({
-                "type": "Invalid Date Format",
-                "severity": "Warning",
-                "count": int(bad_dates.sum()),
-                "detail": f"{int(bad_dates.sum())} dates could not be parsed — inconsistent formats (e.g. '01-Jan-24' vs '1/1/2024') break date filters.",
-                "rows": rows[:10],
-            })
-        else:
-            # Standardise all dates to YYYY-MM-DD
-            df_clean[col_date] = parsed_dates.dt.strftime("%Y-%m-%d")
+    # ── F. Date format inconsistency ─────────────────────────────────────────
+    for col in df_clean.columns:
+        sample = df_clean[col].dropna().head(20)
+        # Check if column looks date-like
+        date_like = sample.apply(lambda x: bool(
+            isinstance(x, str) and re.search(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", str(x))
+        )).sum()
+        if date_like > 3:
+            parsed = pd.to_datetime(df_clean[col], errors="coerce", infer_datetime_format=True)
+            bad = int(parsed.isna().sum()) - int(df_clean[col].isna().sum())
+            if bad > 0:
+                issues.append({
+                    "type": f"Invalid Dates — {col}",
+                    "severity": "Warning",
+                    "count": bad,
+                    "detail": f"Column '{col}' has {bad} unparseable date(s) — inconsistent formats break date filters and reports.",
+                    "rows": [],
+                })
 
-    # ── M. Missing account names ─────────────────────────────────────────────
-    if col_name:
-        blank_name = df_clean[col_name].isna() | (df_clean[col_name].astype(str).str.strip() == "")
-        if blank_name.any():
-            rows = (df_clean.index[blank_name] + 2).tolist()
+    # ── G. Completely empty columns (post-structural clean) ──────────────────
+    empty_cols = [col for col in df_clean.columns if df_clean[col].isna().all()]
+    if empty_cols:
+        issues.append({
+            "type": "Empty Columns",
+            "severity": "Info",
+            "count": len(empty_cols),
+            "detail": f"{len(empty_cols)} column(s) are entirely empty: {empty_cols[:5]} — safe to remove.",
+            "rows": [],
+        })
+        df_clean = df_clean.drop(columns=empty_cols)
+
+    # ── H. Round-number anomaly (numeric columns only) ───────────────────────
+    for col in df_clean.select_dtypes(include=[np.number]).columns:
+        mask = df_clean[col].apply(lambda x: pd.notna(x) and x != 0 and x % 10000 == 0)
+        count = int(mask.sum())
+        if count >= 3:
+            rows = (df_clean.index[mask] + 2).tolist()
             issues.append({
-                "type": "Missing Account Names",
+                "type": f"Round Numbers — {col}",
                 "severity": "Info",
-                "count": int(blank_name.sum()),
-                "detail": f"{int(blank_name.sum())} rows have no account description — reports will show blank labels.",
+                "count": count,
+                "detail": f"{count} values in '{col}' are exact multiples of 10,000 — may indicate estimates or manual entries.",
                 "rows": rows[:10],
             })
-
-    # ── N. Zero-value ghost rows ─────────────────────────────────────────────
-    if col_dr and col_cr:
-        ghost = (df_clean[col_dr] == 0) & (df_clean[col_cr] == 0)
-        if ghost.any():
-            rows = (df_clean.index[ghost] + 2).tolist()
-            issues.append({
-                "type": "Zero-Value Rows",
-                "severity": "Info",
-                "count": int(ghost.sum()),
-                "detail": f"{int(ghost.sum())} rows have zero Debit and zero Credit — safely removed.",
-                "rows": rows[:10],
-            })
-            df_clean = df_clean[~ghost].reset_index(drop=True)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     critical_count = sum(1 for i in issues if i["severity"] == "Critical")
