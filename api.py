@@ -112,7 +112,10 @@ async def clean_data(
         return JSONResponse(status_code=400, content={"error": f"Could not read file: {str(e)}"})
 
     # 3. Pass 2 — pandas data quality checks
-    result = clean(df, structural_fixes=structural_fixes)
+    try:
+        result = clean(df, structural_fixes=structural_fixes)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Cleaning engine error: {str(e)}"})
 
     issues    = result["issues"]
     df_clean  = result["df_clean"]
@@ -169,7 +172,10 @@ Respond in JSON:
     # 4. Save clean file to temp, stream back
     with tempfile.TemporaryDirectory() as tmpdir:
         clean_path = os.path.join(tmpdir, "Cleaned_Data.xlsx")
-        df_clean.to_excel(clean_path, index=False)
+        try:
+            df_clean.to_excel(clean_path, index=False)
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Could not write clean file: {str(e)}"})
 
         # Read bytes to return alongside JSON (as multipart would be complex)
         # Instead: return JSON with issues + base64 clean file
